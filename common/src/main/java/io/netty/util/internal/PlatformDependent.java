@@ -297,6 +297,10 @@ public final class PlatformDependent {
         }
     }
 
+    public static ByteBuffer allocateDirect(int capacity) {
+        return PlatformDependent0.allocateDirect(capacity);
+    }
+
     /**
      * Try to deallocate the specified direct {@link ByteBuffer}.  Please note this method does nothing if
      * the current platform does not support this operation or the specified buffer is not a direct buffer.

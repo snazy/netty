@@ -17,15 +17,18 @@ package io.netty.util.internal;
 
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
+import sun.misc.Cleaner;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.Buffer;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicLongFieldUpdater;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
 
@@ -40,6 +43,12 @@ final class PlatformDependent0 {
     static final Unsafe UNSAFE;
     private static final long ADDRESS_FIELD_OFFSET;
     private static final long BYTE_ARRAY_BASE_OFFSET;
+
+    private static final Class<?> DIRECT_BYTE_BUFFER_CLASS;
+    private static final long DIRECT_BYTE_BUFFER_ADDRESS_OFFSET;
+    private static final long DIRECT_BYTE_BUFFER_CAPACITY_OFFSET;
+    private static final long DIRECT_BYTE_BUFFER_LIMIT_OFFSET;
+    private static final long DIRECT_BYTE_BUFFER_CLEANER_OFFSET;
 
     /**
      * Limits the number of bytes to copy per {@link Unsafe#copyMemory(long, long, long)} to allow safepoint polling
@@ -110,6 +119,11 @@ final class PlatformDependent0 {
             BYTE_ARRAY_BASE_OFFSET = -1;
             ADDRESS_FIELD_OFFSET = -1;
             UNALIGNED = false;
+            DIRECT_BYTE_BUFFER_ADDRESS_OFFSET = 0L;
+            DIRECT_BYTE_BUFFER_CAPACITY_OFFSET = 0L;
+            DIRECT_BYTE_BUFFER_LIMIT_OFFSET = 0L;
+            DIRECT_BYTE_BUFFER_CLEANER_OFFSET = 0L;
+            DIRECT_BYTE_BUFFER_CLASS = null;
         } else {
             ADDRESS_FIELD_OFFSET = objectFieldOffset(addressField);
             boolean unaligned;
@@ -128,6 +142,21 @@ final class PlatformDependent0 {
             UNALIGNED = unaligned;
             logger.debug("java.nio.Bits.unaligned: {}", UNALIGNED);
             BYTE_ARRAY_BASE_OFFSET = arrayBaseOffset();
+
+            try {
+                Class<?> clazz = ByteBuffer.allocateDirect(0).getClass();
+                DIRECT_BYTE_BUFFER_ADDRESS_OFFSET =
+                        unsafe.objectFieldOffset(Buffer.class.getDeclaredField("address"));
+                DIRECT_BYTE_BUFFER_CAPACITY_OFFSET =
+                        unsafe.objectFieldOffset(Buffer.class.getDeclaredField("capacity"));
+                DIRECT_BYTE_BUFFER_LIMIT_OFFSET =
+                        unsafe.objectFieldOffset(Buffer.class.getDeclaredField("limit"));
+                DIRECT_BYTE_BUFFER_CLEANER_OFFSET =
+                        unsafe.objectFieldOffset(clazz.getDeclaredField("cleaner"));
+                DIRECT_BYTE_BUFFER_CLASS = clazz;
+            } catch (NoSuchFieldException e) {
+                throw new RuntimeException(e);
+            }
         }
     }
 
@@ -324,6 +353,66 @@ final class PlatformDependent0 {
 
     static int addressSize() {
         return UNSAFE.addressSize();
+    }
+
+    private static final AtomicLong availableMemory = new AtomicLong(2L * 1024L * 1024L * 1024L);
+
+    private static ByteBuffer directBufferFor(final long address, final long len) {
+        if (len > Integer.MAX_VALUE || len < 0L) {
+            throw new IllegalArgumentException();
+        }
+        try {
+            ByteBuffer bb = (ByteBuffer) UNSAFE.allocateInstance(DIRECT_BYTE_BUFFER_CLASS);
+            UNSAFE.putLong(bb, DIRECT_BYTE_BUFFER_ADDRESS_OFFSET, address);
+            UNSAFE.putInt(bb, DIRECT_BYTE_BUFFER_CAPACITY_OFFSET, (int) len);
+            UNSAFE.putInt(bb, DIRECT_BYTE_BUFFER_LIMIT_OFFSET, (int) len);
+            UNSAFE.putObject(bb, DIRECT_BYTE_BUFFER_CLEANER_OFFSET, Cleaner.create(bb, new Runnable() {
+                @Override
+                public void run() {
+                    UNSAFE.freeMemory(address);
+                    unreserveMemory(len);
+                }
+            }));
+
+            bb.order(ByteOrder.BIG_ENDIAN);
+            return bb;
+        } catch (Error e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new RuntimeException(t);
+        }
+    }
+
+    private static void unreserveMemory(long capacity) {
+        availableMemory.addAndGet(capacity);
+    }
+
+    private static void reserveMemory(long capacity) {
+        while (true) {
+            long avail = availableMemory.get();
+            long expect = avail - capacity;
+            if (expect < 0) {
+                throw new OutOfMemoryError("No more memory available");
+            }
+            if (availableMemory.compareAndSet(avail, expect)) {
+                break;
+            }
+        }
+    }
+
+    static ByteBuffer allocateDirect(int capacity) {
+        if (capacity > 0 && DIRECT_BYTE_BUFFER_CLASS != null) {
+            reserveMemory(capacity);
+
+            long mem = allocateMemory(capacity);
+            if (mem == 0L) {
+                unreserveMemory(capacity);
+                throw new OutOfMemoryError("Direct byte buffer");
+            }
+            return directBufferFor(mem, capacity);
+        }
+
+        return ByteBuffer.allocateDirect(capacity);
     }
 
     static long allocateMemory(long size) {

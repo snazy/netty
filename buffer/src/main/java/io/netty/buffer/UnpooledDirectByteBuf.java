@@ -63,7 +63,7 @@ public class UnpooledDirectByteBuf extends AbstractReferenceCountedByteBuf {
         }
 
         this.alloc = alloc;
-        setByteBuffer(ByteBuffer.allocateDirect(initialCapacity));
+        setByteBuffer(PlatformDependent.allocateDirect(initialCapacity));
     }
 
     /**
@@ -102,7 +102,7 @@ public class UnpooledDirectByteBuf extends AbstractReferenceCountedByteBuf {
      * Allocate a new direct {@link ByteBuffer} with the given initialCapacity.
      */
     protected ByteBuffer allocateDirect(int initialCapacity) {
-        return ByteBuffer.allocateDirect(initialCapacity);
+        return PlatformDependent.allocateDirect(initialCapacity);
     }
 
     /**
